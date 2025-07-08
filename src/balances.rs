@@ -63,7 +63,7 @@ mod tests {
 
         assert_eq!(
             balances.transfer("alice".to_string(), "bob".to_string(), 51),
-            Err("Not  enough funds")
+            Err("Not enough balance")
         );
 
         balances.set_balance(&"alice".to_string(), 100);
@@ -77,7 +77,7 @@ mod tests {
 
         assert_eq!(
             balances.transfer("alice".to_string(), "bob".to_string(), 51),
-            Err("No enough balances")
+            Err("Not enough balance")
         );
     }
 }
