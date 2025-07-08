@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Display};
+use std::collections::BTreeMap;
 
 #[derive(Debug)]
 pub struct Pallet {
@@ -57,6 +57,7 @@ mod tests {
         assert_eq!(balances.balance(&"bob".to_string()), 0);
     }
 
+    #[test]
     fn transfer_balance() {
         let mut balances = super::Pallet::new();
 
