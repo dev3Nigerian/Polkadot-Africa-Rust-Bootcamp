@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::write};
 
 #[derive(Debug)]
 pub struct Pallet {
@@ -7,10 +7,34 @@ pub struct Pallet {
     fee_recipient: Option<String>,
 }
 
-// enum Result<T, E>{
+// enum Result<T, E> {
 //     Ok(T),
-//     Err(E)
+//     Err(E),
 // }
+
+/// Enum and impl to handle  Errors
+#[derive(Debug, PartialEq, Clone)]
+pub enum BalancesError {
+    InsufficientBalance,
+    InsufficientFunds,
+    OverflowInCalculation,
+    OverflowInTransfer,
+    InvalidAmount,
+}
+
+impl std::fmt::Display for BalancesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BalancesError::InsufficientBalance => write!(f, "Insufficient balance"),
+            BalancesError::InsufficientFunds => write!(f, "Insufficient funds to pay fees"),
+            BalancesError::OverflowInCalculation => {
+                write!(f, "Overflow in clculating transfer costs")
+            }
+            BalancesError::OverflowInTransfer => write!(f, "Overflow in transfer calculation"),
+            BalancesError::InvalidAmount => write!(f, "Invalid amount specified"),
+        }
+    }
+}
 
 impl Pallet {
     pub fn new() -> Self {
@@ -49,10 +73,10 @@ impl Pallet {
         }
     }
 
-    fn handle_fee_payment(&mut self, who: &String, fee: u128) -> Result<(), &'static str> {
+    fn handle_fee_payment(&mut self, who: &String, fee: u128) -> Result<(), BalancesError> {
         let payer_balance = self.balance(who);
         if payer_balance < fee {
-            return Err("Insufficient Funds to pay fees");
+            return Result::Err(BalancesError::InsufficientFunds);
         }
 
         //Deduct fee from Payer
@@ -77,11 +101,13 @@ impl Pallet {
         *self.balances.get(who).unwrap_or(&0)
     }
 
-    pub fn get_transfer_cost(&self, amount: u128) -> Result<u128, &'static str> {
+    //Implemented the Balances Error here
+    pub fn get_transfer_cost(&self, amount: u128) -> Result<u128, BalancesError> {
         let fee = self.calculate_fee(amount);
-        amount
-            .checked_add(fee)
-            .ok_or("Overflow in calculating transfer cost")
+        amount.checked_add(fee).map_or_else(
+            || Err(BalancesError::OverflowInCalculation),
+            |total_cost| Ok(total_cost),
+        )
     }
 
     pub fn transfer(
@@ -89,7 +115,7 @@ impl Pallet {
         sender: String,
         receiver: String,
         amount: u128,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), BalancesError> {
         // Add fee calculation
         let fee = self.calculate_fee(amount);
         let sender_balance = self.balance(&sender);
@@ -98,15 +124,17 @@ impl Pallet {
         //Check if Sender has enough balance for fee and transfer amount
         let total_needed = amount
             .checked_add(fee)
-            .ok_or("Overflow in Calculating total needed")?;
+            .ok_or(BalancesError::OverflowInCalculation)?;
         if sender_balance < total_needed {
-            return Err("Not enough balance for transfer and fee");
+            return Err(BalancesError::InsufficientBalance);
         }
 
         let new_sender_balance = sender_balance
             .checked_sub(amount)
-            .ok_or("Not enough balance")?;
-        let new_receiver_balance = receiver_balance.checked_add(amount).ok_or("Overflow")?;
+            .ok_or(BalancesError::InsufficientFunds)?;
+        let new_receiver_balance = receiver_balance
+            .checked_add(amount)
+            .ok_or(BalancesError::OverflowInTransfer)?;
 
         self.balances.insert(sender.clone(), new_sender_balance);
         self.balances.insert(receiver, new_receiver_balance);
@@ -138,7 +166,7 @@ mod tests {
 
         assert_eq!(
             balances.transfer("alice".to_string(), "bob".to_string(), 51),
-            Err("Not enough balance for transfer and fee")
+            Err(BalancesError::InsufficientFunds)
         );
 
         balances.set_balance(&"alice".to_string(), 500);
