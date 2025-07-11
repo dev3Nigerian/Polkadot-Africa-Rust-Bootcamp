@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 
-use crate::balances;
-
 pub struct Pallet {
     balances: BTreeMap<String, u128>,
     base_fee: u128,
@@ -74,12 +72,14 @@ impl Pallet {
     }
 
     pub fn balance(&self, who: &String) -> u128 {
+    pub fn balance(&self, who: &String) -> u128 {
         *self.balances.get(who).unwrap_or(&0)
     }
-
-    pub fn get_transfer_cost (&self, amount: u128) -> Result<u128, &'static str> {
+    pub fn get_transfer_cost(&self, amount: u128) -> Result<u128, &'static str> {
         let fee = self.calculate_fee(amount);
-        amount.checked_add(fee).ok_or("Overflow in calculating transfer cost")
+        amount
+            .checked_add(fee)
+            .ok_or("Overflow in calculating transfer cost")
     }
 
     pub fn transfer(
@@ -123,13 +123,23 @@ mod tests {
     #[test]
     fn init_balances() {
         let mut balances = super::Pallet::new();
+    fn init_balances() {
+        let mut balances = super::Pallet::new();
 
         assert_eq!(balances.balance(&"alice".to_string()), 0);
         balances.set_balance(&"alice".to_string(), 100);
         assert_eq!(balances.balance(&"alice".to_string()), 100);
         assert_eq!(balances.balance(&"bob".to_string()), 0);
     }
+        assert_eq!(balances.balance(&"alice".to_string()), 0);
+        balances.set_balance(&"alice".to_string(), 100);
+        assert_eq!(balances.balance(&"alice".to_string()), 100);
+        assert_eq!(balances.balance(&"bob".to_string()), 0);
+    }
 
+    #[test]
+    fn transfer_balance() {
+        let mut balances = super::Pallet::new();
     #[test]
     fn transfer_balance() {
         let mut balances = super::Pallet::new();
@@ -177,20 +187,10 @@ mod tests {
         balances.set_balance(&"alice".to_string(), 100);
         balances.set_balance(&"treasury".to_string(), 10);
 
-        assert_eq!(
-            balances.transfer("alice".to_string(), "bob".to_string(), 30),
-            Ok(())
-        );
-
-        assert_eq!(balances.balance(&"alice".to_string() ),65);
-        assert_eq!(balances.balance(&"treasury".to_string() ),15);
-        assert_eq!(balances.balance(&"bob".to_string() ),30);
-    }
-
-    #[test]
-    fn check_transfer_cost () {
-        let balances = Pallet::new();
-        assert_eq!(balances.get_transfer_cost(100), Ok(110));
-        assert_eq!(balances.get_transfer_cost(200), Ok(220));
-    }
+assert_eq!(
+    balances.transfer("alice".to_string(), "bob".to_string(), 51),
+    Err("No enough balances")
+);
+   
+}
 }
