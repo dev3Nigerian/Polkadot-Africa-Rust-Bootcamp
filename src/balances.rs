@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
 pub struct Pallet {
     balances: BTreeMap<String, u128>,
     base_fee: u128,
@@ -27,6 +28,7 @@ impl Pallet {
             fee_recipient,
         }
     }
+
     pub fn set_transaction_fee(&mut self, fee: u128) {
         self.base_fee = fee;
     }
@@ -36,7 +38,7 @@ impl Pallet {
     }
 
     pub fn set_fee_recipient(&mut self, recipient: Option<String>) {
-        self.fee_recipient = recipient
+        self.fee_recipient = recipient;
     }
 
     fn calculate_fee(&self, _amount: u128) -> u128 {
@@ -72,9 +74,9 @@ impl Pallet {
     }
 
     pub fn balance(&self, who: &String) -> u128 {
-    pub fn balance(&self, who: &String) -> u128 {
         *self.balances.get(who).unwrap_or(&0)
     }
+
     pub fn get_transfer_cost(&self, amount: u128) -> Result<u128, &'static str> {
         let fee = self.calculate_fee(amount);
         amount
@@ -118,11 +120,9 @@ impl Pallet {
 
 #[cfg(test)]
 mod tests {
-    use crate::balances::Pallet;
+    use super::*;
 
     #[test]
-    fn init_balances() {
-        let mut balances = super::Pallet::new();
     fn init_balances() {
         let mut balances = super::Pallet::new();
 
@@ -131,15 +131,7 @@ mod tests {
         assert_eq!(balances.balance(&"alice".to_string()), 100);
         assert_eq!(balances.balance(&"bob".to_string()), 0);
     }
-        assert_eq!(balances.balance(&"alice".to_string()), 0);
-        balances.set_balance(&"alice".to_string(), 100);
-        assert_eq!(balances.balance(&"alice".to_string()), 100);
-        assert_eq!(balances.balance(&"bob".to_string()), 0);
-    }
 
-    #[test]
-    fn transfer_balance() {
-        let mut balances = super::Pallet::new();
     #[test]
     fn transfer_balance() {
         let mut balances = super::Pallet::new();
@@ -182,15 +174,21 @@ mod tests {
 
     #[test]
     fn transfer_with_fee_recipient() {
-        let mut balances = Pallet::new_with_fee_config(5, Some("treasury".to_string()));
+        let mut balances = super::Pallet::new_with_fee_config(5, Some("treasury".to_string()));
 
         balances.set_balance(&"alice".to_string(), 100);
         balances.set_balance(&"treasury".to_string(), 10);
 
-assert_eq!(
-    balances.transfer("alice".to_string(), "bob".to_string(), 51),
-    Err("No enough balances")
-);
-   
-}
+        assert_eq!(
+            balances.transfer("alice".to_string(), "bob".to_string(), 30),
+            Ok(())
+        );
+
+        // Alice: 100 - 30 - 5 = 65
+        assert_eq!(balances.balance(&"alice".to_string()), 65);
+        // Bob: 0 + 30 = 30
+        assert_eq!(balances.balance(&"bob".to_string()), 30);
+        // Treasury: 10 + 5 = 15
+        assert_eq!(balances.balance(&"treasury".to_string()), 15);
+    }
 }
