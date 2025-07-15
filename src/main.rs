@@ -1,4 +1,5 @@
 mod balances;
+mod staking;
 mod system;
 
 /// This is our runtime, it allows us to interact with all logic in the system.
@@ -6,6 +7,7 @@ mod system;
 pub struct Runtime {
     pub system: system::Pallet,
     pub balances: balances::Pallet,
+    pub staking: staking::Pallet,
 }
 
 impl Runtime {
@@ -14,12 +16,16 @@ impl Runtime {
         Runtime {
             system: system::Pallet::new(),
             balances: balances::Pallet::new(),
+            staking: staking::Pallet::new(),
         }
     }
 
     fn create_block(&mut self, transactions: Vec<Transaction>) -> BlockResult {
         self.system.inc_block_number();
         let current_block = self.system.block_number();
+
+        // Notify staking pallet about new block
+        self.staking.on_block(current_block);
 
         println!("\n=== Creating Block #{} ===", current_block);
 
@@ -41,6 +47,10 @@ impl Runtime {
         }
         // Finalize the block and generate hash
         let block_hash = self.system.finalize_block();
+
+        // Print staking events for this block
+        self.print_staking_events();
+
         println!("📦 Block #{} finalized", current_block);
         println!("🔗 Block Hash: {:?}", hex_encode(&block_hash[..8]));
 
@@ -77,20 +87,101 @@ impl Runtime {
                     }
                 }
             }
+            Transaction::AddValidator {
+                validator,
+                commission,
+            } => match self.staking.add_validator(validator.clone(), commission) {
+                staking::Result::Ok(_) => {
+                    println!(
+                        "✅ Validator added: {} (commission: {}%)",
+                        validator, commission
+                    );
+                    Ok(())
+                }
+                staking::Result::Err(e) => {
+                    println!("❌ Failed to add validator: {} - Error: {:?}", validator, e);
+                    Err(format!("{:?}", e))
+                }
+            },
             Transaction::SetBalance { who, amount } => {
                 println!("💰 Set balance: {} = {}", who, amount);
                 self.balances.set_balance(&who, amount);
                 Ok(())
             }
+            Transaction::Stake {
+                who,
+                amount,
+                validator,
+            } => {
+                self.system.inc_nonce(&who);
+
+                // Create a closure that checks balance
+                let balances = &self.balances;
+                let balance_check = |account: &String| -> u128 { balances.balance(account) };
+
+                match self
+                    .staking
+                    .stake(who.clone(), amount, validator.clone(), balance_check)
+                {
+                    Ok(_) => {
+                        // Deduct the staked amount from balance
+                        let current_balance = self.balances.balance(&who);
+                        self.balances.set_balance(&who, current_balance - amount);
+                        println!(
+                            "🔒 Staked: {} staked {} with validator {}",
+                            who, amount, validator
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!("❌ Staking failed for {}: {:?}", who, e);
+                        Err(format!("{:?}", e))
+                    }
+                }
+            }
+            Transaction::Unstake { who } => {
+                self.system.inc_nonce(&who);
+
+                match self.staking.unstake(who.clone()) {
+                    Ok(amount) => {
+                        // Return the unstaked amount to balance
+                        let current_balance = self.balances.balance(&who);
+                        self.balances.set_balance(&who, current_balance + amount);
+                        println!("🔓 Unstaked: {} unstaked {} tokens", who, amount);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!("❌ Unstaking failed for {}: {:?}", who, e);
+                        Err(format!("{:?}", e))
+                    }
+                }
+            }
+            Transaction::ClaimRewards { who } => {
+                self.system.inc_nonce(&who);
+
+                match self.staking.claim_rewards(who.clone()) {
+                    Ok(rewards) => {
+                        // Add rewards to balance
+                        let current_balance = self.balances.balance(&who);
+                        self.balances.set_balance(&who, current_balance + rewards);
+                        println!("🎁 Rewards claimed: {} received {} tokens", who, rewards);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!("❌ Failed to claim rewards for {}: {:?}", who, e);
+                        Err(format!("{:?}", e))
+                    }
+                }
+            }
         }
     }
 
-    // Print comprehensive Blockchain state
+    // Print comprehensive Blockchain state - updated to include staking info
     fn print_blockchain_state(&self) {
         println!("\n🔍 === BLOCKCHAIN STATE ===");
         println!("Current Block: #{}", self.system.block_number());
 
-        // show block hashes
+        // Show block hashes
         let all_hashes = self.system.all_block_hashes();
         println!("\n📚 Block Hashes:");
         for (block_num, hash) in all_hashes.iter().rev().take(5) {
@@ -108,13 +199,46 @@ impl Runtime {
             }
         }
 
-        //Show Genesis Hash
+        // Show Staking Information
+        println!("\n🔒 Staking Information:");
+        let stats = self.staking.get_staking_stats();
+        println!("  Total Staked: {}", stats.total_staked);
+        println!(
+            "  Active Validators: {}/{}",
+            stats.active_validators, stats.total_validators
+        );
+        println!("  Total Stakers: {}", stats.total_stakers);
+
+        // Show validators
+        if stats.total_validators > 0 {
+            println!("\n  Validators:");
+            for (validator, info) in self.staking.get_active_validators() {
+                println!(
+                    "    • {}: {} staked ({}% commission, {} nominators)",
+                    validator, info.total_stake, info.commission_rate, info.nominators_count
+                );
+            }
+        }
+
+        // Show stakers
+        for account in accounts {
+            if let Some(stake_info) = self.staking.get_stake_info(&account.to_string()) {
+                println!(
+                    "    • {} staking {} with {} (rewards: {})",
+                    account,
+                    stake_info.staked_amount,
+                    stake_info.validator,
+                    stake_info.total_rewards
+                );
+            }
+        }
+
+        // Show Genesis Hash
         if let Some(genesis_hash) = self.system.genesis_hash() {
             println!("\n🌱 Genesis Hash: {}", hex_encode(&genesis_hash[..8]));
         }
         println!("=========================\n");
     }
-
     // Verify Blockchain Integrity
     fn verify_chain_integrity(&self) -> bool {
         let all_hashes = self.system.all_block_hashes();
@@ -130,6 +254,35 @@ impl Runtime {
         println!("🔐 Blockchain integrity verified!");
         true
     }
+
+    /// Print staking events
+    fn print_staking_events(&self) {
+        let events = self.staking.get_events();
+        if !events.is_empty() {
+            println!("\n📋 Staking Events:");
+            for event in events {
+                match event {
+                    staking::StakingEvent::ValidatorAdded { validator } => {
+                        println!("  • Validator added: {}", validator);
+                    }
+                    staking::StakingEvent::Staked {
+                        who,
+                        amount,
+                        validator,
+                    } => {
+                        println!("  • {} staked {} tokens with {}", who, amount, validator);
+                    }
+                    staking::StakingEvent::Unstaked { who, amount } => {
+                        println!("  • {} unstaked {} tokens", who, amount);
+                    }
+                    staking::StakingEvent::RewardsPaid { who, amount } => {
+                        println!("  • {} received {} tokens in rewards", who, amount);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 // Transaction types
@@ -143,6 +296,21 @@ pub enum Transaction {
     SetBalance {
         who: String,
         amount: u128,
+    },
+    AddValidator {
+        validator: String,
+        commission: u8,
+    },
+    Stake {
+        who: String,
+        amount: u128,
+        validator: String,
+    },
+    Unstake {
+        who: String,
+    },
+    ClaimRewards {
+        who: String,
     },
 }
 
@@ -272,6 +440,92 @@ fn main() {
         block_3_result.transaction_count,
         block_3_result.successful_transactions.len() + block_3_result.failed_transactions.len()
     );
+
+    // Block 4 - Set up validators
+    println!("\n⚡ === STAKING SETUP ===");
+    let block_4_transactions = vec![
+        Transaction::AddValidator {
+            validator: "cheryl".to_string(),
+            commission: 5, // 5% commission
+        },
+        Transaction::AddValidator {
+            validator: "nathaniel".to_string(),
+            commission: 10, // 10% commission
+        },
+    ];
+    let block_4_result = runtime.create_block(block_4_transactions);
+    println!("Block 4 completed: Validators initialized");
+
+    // Block 5 - Staking transactions
+    let block_5_transactions = vec![
+        Transaction::Stake {
+            who: "femi".to_string(),
+            amount: 200,
+            validator: "cheryl".to_string(),
+        },
+        Transaction::Stake {
+            who: "temi".to_string(),
+            amount: 150,
+            validator: "nathaniel".to_string(),
+        },
+        Transaction::Stake {
+            who: "faith".to_string(),
+            amount: 50, // This might fail if faith doesn't have enough balance
+            validator: "cheryl".to_string(),
+        },
+    ];
+    let block_5_result = runtime.create_block(block_5_transactions);
+    println!("Block 5 completed: Staking initiated");
+
+    // Advance several blocks to accumulate rewards
+    for i in 6..=10 {
+        runtime.create_block(vec![]);
+        println!("Block {} created (empty)", i);
+    }
+
+    // Block 11 - Claim rewards
+    let block_11_transactions = vec![
+        Transaction::ClaimRewards {
+            who: "femi".to_string(),
+        },
+        Transaction::ClaimRewards {
+            who: "temi".to_string(),
+        },
+    ];
+
+    let block_11_result = runtime.create_block(block_11_transactions);
+    println!("Block 11 completed: Rewards claimed");
+
+    // Block 12 - Try unstaking (some might fail due to unstaking period)
+    let block_12_transactions = vec![
+        Transaction::Unstake {
+            who: "femi".to_string(),
+        },
+        Transaction::Unstake {
+            who: "temi".to_string(),
+        },
+    ];
+
+    let block_12_result = runtime.create_block(block_12_transactions);
+    println!("Block 12 completed: Unstaking attempted");
+
+    // Advance more blocks to pass unstaking period
+    for i in 13..=20 {
+        runtime.create_block(vec![]);
+    }
+
+    // Block 21 - Retry unstaking
+    let block_21_transactions = vec![
+        Transaction::Unstake {
+            who: "femi".to_string(),
+        },
+        Transaction::Unstake {
+            who: "temi".to_string(),
+        },
+    ];
+
+    runtime.create_block(block_21_transactions);
+    println!("Block 21 completed: Unstaking successful");
 
     //Print final state
     runtime.print_blockchain_state();
