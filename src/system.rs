@@ -4,67 +4,85 @@ use core::ops::AddAssign;
 
 pub trait Config {
     type AccountId: Ord + Clone;                    
-    type BlockNumber: Zero + One + AddAssign + Copy; 
+    type BlockNumber: Zero + One + AddAssign + Copy + PartialOrd + Ord; 
     type Nonce: Zero + One + Copy;                 
 }
 
-
 #[derive(Debug)]
-pub struct Pallet<T: Config> {  // T is a placeholder for any type that implements Config
-    pub block_number: T::BlockNumber,                    // Uses the BlockNumber type from T
-    pub nonce: BTreeMap<T::AccountId, T::Nonce>,        // Uses AccountId and Nonce types from T
-    pub block_hashes: BTreeMap<T::BlockNumber, [u8; 32]>, // Track block hashes with generic type
+pub struct Pallet<T: Config> {
+    pub block_number: T::BlockNumber,
+    pub nonce: BTreeMap<T::AccountId, T::Nonce>,
+    pub block_hashes: BTreeMap<T::BlockNumber, [u8; 32]>,
 }
 
-impl<T: Config> Pallet<T> {      /// Create an instance of the pallet
+impl<T: Config> Pallet<T> {
+    /// Create an instance of the pallet
     pub fn new() -> Self {
         Self {
-            block_number: T::BlockNumber::zero(),  // Start at zero using the generic type's zero
+            block_number: T::BlockNumber::zero(),
             nonce: BTreeMap::new(),
             block_hashes: BTreeMap::new(),
         }
     }
 
     /// Get the current block number
-  pub fn block_number(&self) -> T::BlockNumber {
+    pub fn block_number(&self) -> T::BlockNumber {
         self.block_number
     }
 
     /// Increase the block number by one
-      pub fn inc_block_number(&mut self) {
+    pub fn inc_block_number(&mut self) {
         self.block_number += T::BlockNumber::one();  
     }
+
     /// Increase the nonce value of the caller `who`
-     pub fn inc_nonce(&mut self, who: &T::AccountId) {
+    pub fn inc_nonce(&mut self, who: &T::AccountId) {
         let nonce = *self.nonce.get(who).unwrap_or(&T::Nonce::zero());
         let new_nonce = nonce + T::Nonce::one();
         self.nonce.insert(who.clone(), new_nonce);
     }
 
     /// Generate block hash based on block number and nonce data
-   fn generate_block_hash(&self) -> [u8; 32] {
+    fn generate_block_hash(&self) -> [u8; 32] {
         let mut hash = [0u8; 32];
 
-        let block_num_as_u32 = if self.block_number == T::BlockNumber::zero() {
-            0u32
+        // Convert block number to a simple representation for hashing
+        // This is a simplified approach - in reality you'd use proper serialization
+        let block_bytes = if self.block_number == T::BlockNumber::zero() {
+            0u32.to_be_bytes()
         } else {
-
-            1u32
+            // For simplicity, we'll use the count of all block hashes as a proxy
+            (self.block_hashes.len() as u32).to_be_bytes()
         };
         
-        let block_bytes = block_num_as_u32.to_be_bytes();
         hash[0..4].copy_from_slice(&block_bytes);
 
+        // Include nonce data in hash
         let nonce_count = self.nonce.len() as u32;
         let nonce_bytes = nonce_count.to_be_bytes();
         hash[4..8].copy_from_slice(&nonce_bytes);
 
-        // Fill the rest with pattern based on block number
-        for i in 8..32 {
-            hash[i] = ((i + block_num_as_u32 as usize) % 256) as u8;
+        // Include previous block hash if available
+        if let Some(parent_hash) = self.get_parent_hash_for_generation() {
+            hash[8..16].copy_from_slice(&parent_hash[0..8]);
+        }
+
+        // Fill the rest with a pattern
+        for i in 16..32 {
+            hash[i] = ((i + nonce_count as usize) % 256) as u8;
         }
 
         hash
+    }
+
+    /// Helper function to get parent hash during generation
+    fn get_parent_hash_for_generation(&self) -> Option<[u8; 32]> {
+        if self.block_hashes.is_empty() {
+            None
+        } else {
+            // Get the most recent hash
+            self.block_hashes.values().last().copied()
+        }
     }
 
     /// Finalize the current block and generate its hash
@@ -75,7 +93,7 @@ impl<T: Config> Pallet<T> {      /// Create an instance of the pallet
     }
 
     /// Get block hash for a specific block number
-     pub fn get_block_hash(&self, block_number: T::BlockNumber) -> Option<[u8; 32]> {
+    pub fn get_block_hash(&self, block_number: T::BlockNumber) -> Option<[u8; 32]> {
         self.block_hashes.get(&block_number).copied()
     }
 
@@ -85,18 +103,25 @@ impl<T: Config> Pallet<T> {      /// Create an instance of the pallet
     }
 
     /// Get the hash of the parent block
-    // pub fn parent_block_hash(&self) -> Option<[u8; 32]> {
-    //     if self.block_number > 0 {
-    //         self.get_block_hash(self.block_number - 1)
-    //     } else {
-    //         None
-    //     }
-    // }
-     pub fn parent_block_hash(&self) -> Option<[u8; 32]> {
+    pub fn parent_block_hash(&self) -> Option<[u8; 32]> {
         if self.block_number > T::BlockNumber::zero() {
-            let prev_blocks: Vec<_> = self.block_hashes.keys().collect();
-            if let Some(&last_block) = prev_blocks.iter().rev().nth(1) {
-                self.get_block_hash(*last_block)
+            // Find the previous block number
+            let mut prev_block = None;
+            for &block_num in self.block_hashes.keys() {
+                if block_num < self.block_number {
+                    match prev_block {
+                        None => prev_block = Some(block_num),
+                        Some(current_prev) => {
+                            if block_num > current_prev {
+                                prev_block = Some(block_num);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if let Some(prev) = prev_block {
+                self.get_block_hash(prev)
             } else {
                 None
             }
@@ -106,18 +131,12 @@ impl<T: Config> Pallet<T> {      /// Create an instance of the pallet
     }
 
     /// Get all block hashes
-    // pub fn all_block_hashes(&self) -> &BTreeMap<u32, [u8; 32]> {
-    //     &self.block_hashes
-    // }
-     pub fn all_block_hashes(&self) -> &BTreeMap<T::BlockNumber, [u8; 32]> {
+    pub fn all_block_hashes(&self) -> &BTreeMap<T::BlockNumber, [u8; 32]> {
         &self.block_hashes
     }
 
     /// Get the genesis block hash (block 0)
-    // pub fn genesis_hash(&self) -> Option<[u8; 32]> {
-    //     self.get_block_hash(0)
-    // }
-     pub fn genesis_hash(&self) -> Option<[u8; 32]> {
+    pub fn genesis_hash(&self) -> Option<[u8; 32]> {
         self.get_block_hash(T::BlockNumber::zero())
     }
 }
@@ -129,33 +148,13 @@ mod tests {
     struct TestConfig;
 
     impl Config for TestConfig {
-        type AccountId = String;     // In tests, accounts are Strings
-        type BlockNumber = u32;      // In tests, block numbers are u32
-        type Nonce = u32;           // In tests, nonces are u32
+        type AccountId = String;
+        type BlockNumber = u32;
+        type Nonce = u32;
     }
 
     #[test]
-    // fn system_pallet_work() {
-    //     // Arrange
-    //     // create system pallet
-    //     let mut system = Pallet::new();
-
-    //     // Act
-    //     // increase current block number
-    //     system.inc_block_number();
-    //     // increase the nonce of a user - `Temi`
-    //     system.inc_nonce(&"Temi".to_string());
-
-    //     // Assert
-    //     // Check the block number (i.e. 1)
-    //     assert_eq!(system.block_number(), 1);
-    //     // Check the nonce of Temi (i.e. 1)
-    //     assert_eq!(system.nonce.get("Temi"), Some(&1));
-    //     // Check the nonce of Faithful (i.e. 0)
-    //     assert_eq!(system.nonce.get("Faithful"), None);
-    // }
     fn system_pallet_work() {
-        // Create system pallet with our test configuration
         let mut system = Pallet::<TestConfig>::new();
 
         system.inc_block_number();
@@ -167,7 +166,7 @@ mod tests {
     }
 
     #[test]
-     fn test_block_hash_generation() {
+    fn test_block_hash_generation() {
         let mut system = Pallet::<TestConfig>::new();
 
         let genesis_hash = system.finalize_block();
@@ -187,92 +186,57 @@ mod tests {
         // Hashes should be different
         assert_ne!(genesis_hash, block_1_hash);
     }
-    // fn test_block_hash_generation() {
-    //     let mut system = Pallet::new();
 
-    //     // Genesis block
-    //     let genesis_hash = system.finalize_block();
-    //     assert_eq!(system.block_number(), 0);
-    //     assert_eq!(system.get_block_hash(0), Some(genesis_hash));
-    //     assert_eq!(system.current_block_hash(), Some(genesis_hash));
-    //     assert_eq!(system.genesis_hash(), Some(genesis_hash));
+    #[test]
+    fn test_block_hash_consistency() {
+        let mut system = Pallet::<TestConfig>::new();
 
-    //     // Move to block 1
-    //     system.inc_block_number();
-    //     assert_eq!(system.block_number(), 1);
+        let hash_1 = system.finalize_block();
+        let hash_2 = system.finalize_block();
 
-    //     //Add nonce data
-    //     system.inc_nonce(&"Alice".to_string());
-    //     system.inc_nonce(&"Bob".to_string());
+        // Same state should produce same hash
+        assert_eq!(hash_1, hash_2);
 
-    //     // FInalize block 1
-    //     let block_1_hash = system.finalize_block();
-    //     assert_eq!(system.get_block_hash(1), Some(block_1_hash));
-    //     assert_eq!(system.current_block_hash(), Some(block_1_hash));
-    //     assert_eq!(system.parent_block_hash(), Some(genesis_hash));
+        system.inc_block_number();
+        system.inc_nonce(&"Bob".to_string());
 
-    //     // Hashes should be different
-    //     assert_ne!(genesis_hash, block_1_hash);
-    // }
+        let hash_3 = system.finalize_block();
+        assert_ne!(hash_2, hash_3);
+    }
 
-    
-    
+    #[test]
+    fn test_parent_block_hash() {
+        let mut system = Pallet::<TestConfig>::new();
 
-    // TODO change to new config
-    // #[test]
-    // fn test_block_hash_consistency() {
-    //     let mut system = Pallet::new();
+        // Genesis block has no parent
+        assert_eq!(system.parent_block_hash(), None);
 
-    //     let hash_1 = system.finalize_block();
-    //     let hash_2 = system.finalize_block();
+        let genesis_hash = system.finalize_block();
+        
+        system.inc_block_number();
+        let block_1_hash = system.finalize_block();
+        
+        // Now block 1 should have genesis as parent
+        assert_eq!(system.parent_block_hash(), Some(genesis_hash));
+    }
 
-    //     //same blocks should produce same hash
-    //     assert_eq!(hash_1, hash_2);
+    #[test]
+    fn test_all_block_hashes() {
+        let mut system = Pallet::<TestConfig>::new();
 
-    //     system.inc_block_number();
-    //     system.inc_nonce(&"Bob".to_string());
+        // Initially empty
+        assert_eq!(system.all_block_hashes().len(), 0);
 
-    //     let hash_3 = system.finalize_block();
-    //     assert_ne!(hash_2, hash_3)
-    // }
+        let hash_0 = system.finalize_block();
+        system.inc_block_number();
+        let hash_1 = system.finalize_block();
+        system.inc_block_number();
+        let hash_2 = system.finalize_block();
 
-    // #[test]
-    // fn test_parent_bloch_hash() {
-    //     let mut system = Pallet::new();
-
-    //     //Genesis block has no parent
-    //     assert_eq!(system.parent_block_hash(), None);
-
-    //     let genesis_hash = system.finalize_block();
-    //     // This test will fail
-    //     // assert_eq!(system.parent_block_hash(), Some(genesis_hash))
-
-    //     system.inc_block_number();
-    //     assert_eq!(system.parent_block_hash(), Some(genesis_hash));
-
-    //     // Block is finalized without being increased; this will still be the genesis block
-    //     let block_1_hash = system.finalize_block();
-    //     assert_eq!(system.parent_block_hash(), Some(block_1_hash))
-    // }
-
-    // #[test]
-    // fn test_all_block_hashes() {
-    //     let mut system = Pallet::new();
-
-    //     // Initially empty
-    //     assert_eq!(system.all_block_hashes().len(), 0);
-
-    //     let hash_0 = system.finalize_block();
-    //     system.inc_block_number();
-    //     let hash_1 = system.finalize_block();
-    //     system.inc_block_number();
-    //     let hash_2 = system.finalize_block();
-    //     system.inc_block_number();
-
-    //     let all_hashes = system.all_block_hashes();
-    //    assert_eq!(all_hashes.len(), 3);
-    //    assert_eq!(all_hashes.get(&0), Some(&hash_0));
-    //    assert_eq!(all_hashes.get(&1), Some(&hash_1));
-    //    assert_eq!(all_hashes.get(&2), Some(&hash_2));
-    // }
+        let all_hashes = system.all_block_hashes();
+        assert_eq!(all_hashes.len(), 3);
+        assert_eq!(all_hashes.get(&0), Some(&hash_0));
+        assert_eq!(all_hashes.get(&1), Some(&hash_1));
+        assert_eq!(all_hashes.get(&2), Some(&hash_2));
+    }
 }

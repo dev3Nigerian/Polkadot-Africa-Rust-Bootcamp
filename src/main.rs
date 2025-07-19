@@ -1,9 +1,9 @@
-use support::Dispatch;
-
 mod balances;
 mod staking;
 mod support;
 mod system;
+
+use support::Dispatch;
 
 // Type module - this is where we define all the concrete types for our runtime
 mod types {
@@ -157,11 +157,16 @@ impl Runtime {
 
                 match self.staking.stake(who.clone(), amount, validator.clone(), balance_check) {
                     Ok(_) => {
-                        // Deduct the staked amount from balance
+                        // Deduct the staked amount from balance (with proper error checking)
                         let current_balance = self.balances.balance(&who);
-                        self.balances.set_balance(&who, current_balance - amount);
-                        println!("🔒 Staked: {} staked {} with validator {}", who, amount, validator);
-                        Ok(())
+                        if current_balance >= amount {
+                            self.balances.set_balance(&who, current_balance - amount);
+                            println!("🔒 Staked: {} staked {} with validator {}", who, amount, validator);
+                            Ok(())
+                        } else {
+                            println!("❌ Insufficient balance after staking validation");
+                            Err("Insufficient balance".to_string())
+                        }
                     }
                     Err(e) => {
                         println!("❌ Staking failed for {}: {:?}", who, e);
@@ -416,6 +421,18 @@ fn main() {
             who: femi.clone(),
             amount: 500,
         },
+        Transaction::SetBalance {
+            who: temi.clone(),
+            amount: 300,
+        },
+        Transaction::SetBalance {
+            who: nathaniel.clone(),
+            amount: 200,
+        },
+        Transaction::SetBalance {
+            who: faith.clone(),
+            amount: 100,
+        },
     ];
 
     let genesis_result = runtime.create_block(genesis_transactions);
@@ -444,7 +461,7 @@ fn main() {
     ];
 
     let block_1_result = runtime.create_block(block_1_transactions);
-    println!("Block 1 completed with {} transactions", block_1_result.transaction_count);
+    println!("Block 1 completed with {} successful transactions", block_1_result.transaction_count);
 
     // Block 2 - More transfers
     let block_2_transactions = vec![
@@ -466,14 +483,14 @@ fn main() {
     ];
 
     let block_2_result = runtime.create_block(block_2_transactions);
-    println!("Block 2 completed with {} transactions", block_2_result.transaction_count);
+    println!("Block 2 completed with {} successful transactions", block_2_result.transaction_count);
 
     // Block 3 - Include some failures
     let block_3_transactions = vec![
         Transaction::Transfer {
             from: cheryl.clone(),
             to: nathaniel.clone(),
-            amount: 9200, // Should fail
+            amount: 9200, // Should fail - insufficient balance
         },
         Transaction::Transfer {
             from: temi.clone(),
@@ -488,7 +505,7 @@ fn main() {
     ];
 
     let block_3_result = runtime.create_block(block_3_transactions);
-    println!("Block 3 completed with {} transactions", block_3_result.transaction_count);
+    println!("Block 3 completed with {} successful transactions", block_3_result.transaction_count);
 
     // Block 4 - Set up validators and staking
     println!("\n⚡ === STAKING SETUP ===");
@@ -503,7 +520,7 @@ fn main() {
         },
     ];
     let block_4_result = runtime.create_block(block_4_transactions);
-    println!("Block 4 completed: Validators initialized");
+    println!("Block 4 completed: Validators initialized with {} transactions", block_4_result.transaction_count);
 
     // Block 5 - Staking transactions
     let block_5_transactions = vec![
@@ -519,7 +536,7 @@ fn main() {
         },
     ];
     let block_5_result = runtime.create_block(block_5_transactions);
-    println!("Block 5 completed: Staking initiated");
+    println!("Block 5 completed: Staking initiated with {} transactions", block_5_result.transaction_count);
 
     // Advance several blocks to accumulate rewards
     for i in 6..=10 {
@@ -527,7 +544,7 @@ fn main() {
         println!("Block {} created (empty block for rewards)", i);
     }
 
-    // Block 11 - Claim rewards and unstake
+    // Block 11 - Claim rewards
     let block_11_transactions = vec![
         Transaction::ClaimRewards {
             who: "femi".to_string(),
@@ -535,12 +552,36 @@ fn main() {
         Transaction::ClaimRewards {
             who: "temi".to_string(),
         },
+    ];
+    let block_11_result = runtime.create_block(block_11_transactions);
+    println!("Block 11 completed: Rewards claimed with {} transactions", block_11_result.transaction_count);
+
+    // Block 12 - Try unstaking (should fail due to unstaking period)
+    let block_12_transactions = vec![
         Transaction::Unstake {
             who: "femi".to_string(),
         },
     ];
-    let block_11_result = runtime.create_block(block_11_transactions);
-    println!("Block 11 completed: Rewards claimed and unstaking attempted");
+    let block_12_result = runtime.create_block(block_12_transactions);
+    println!("Block 12 completed: Unstaking attempted with {} successful transactions", block_12_result.transaction_count);
+
+    // Advance more blocks to pass unstaking period
+    for i in 13..=20 {
+        runtime.create_block(vec![]);
+        println!("Block {} created (advancing time for unstaking)", i);
+    }
+
+    // Block 21 - Retry unstaking (should succeed now)
+    let block_21_transactions = vec![
+        Transaction::Unstake {
+            who: "femi".to_string(),
+        },
+        Transaction::Unstake {
+            who: "temi".to_string(),
+        },
+    ];
+    let block_21_result = runtime.create_block(block_21_transactions);
+    println!("Block 21 completed: Unstaking successful with {} transactions", block_21_result.transaction_count);
 
     // Example using the support framework (like the main branch)
     println!("\n🔧 === USING SUPPORT FRAMEWORK ===");
@@ -576,7 +617,7 @@ fn main() {
 
     // Demonstrate hash relationships
     println!("🔗 === BLOCK HASH RELATIONSHIPS ===");
-    for block_num in 0..=runtime.system.block_number() {
+    for block_num in 0..=runtime.system.block_number().min(10) { // Limit output for readability
         if let Some(hash) = runtime.system.get_block_hash(block_num) {
             println!("Block #{}: {}", block_num, hex_encode(&hash[..16]));
 
@@ -601,17 +642,5 @@ fn main() {
         runtime.system.all_block_hashes().len()
     );
 
-    println!("\n✨ === GENERIC BENEFITS DEMONSTRATED ===");
-    println!("• Type safety: AccountId, Balance, BlockNumber are enforced at compile time");
-    println!("• Flexibility: Easy to change u128 to u64 or String to u32 by updating types module");
-    println!("• Reusability: Same pallet code works with different type configurations");
-    println!("• Maintainability: Types are centralized in one place");
-    println!("• Staking integration: Generic staking pallet works seamlessly with balances");
-    
-    println!("\n🎯 === STAKING FEATURES IMPLEMENTED ===");
-    println!("• Generic validator management");
-    println!("• Type-safe staking operations");
-    println!("• Reward calculation and distribution");
-    println!("• Unstaking with period requirements");
-    println!("• Integration with balance transfers");
+
 }

@@ -8,7 +8,7 @@ use num::traits::{CheckedSub, CheckedAdd, Zero};
 //     fee_recipient: Option<String>,
 // }
 pub trait Config: crate::system::Config {
-    type Balance: CheckedAdd + CheckedSub + Zero + Copy;  // Balance must support safe math
+    type Balance: CheckedAdd + CheckedSub + Zero + Copy + PartialOrd;  // Added PartialOrd
 }
 
 // enum Result<T, E> {
