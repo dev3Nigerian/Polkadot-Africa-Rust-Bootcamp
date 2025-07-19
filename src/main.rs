@@ -1,22 +1,65 @@
+use support::Dispatch;
+
 mod balances;
 mod staking;
+mod support;
 mod system;
 
-/// This is our runtime, it allows us to interact with all logic in the system.
+// Type module - this is where we define all the concrete types for our runtime
+mod types {
+    pub type AccountId = String;        // Accounts are represented as Strings
+    pub type Balance = u128;           // Balances are 128-bit unsigned integers
+    pub type BlockNumber = u32;        // Block numbers are 32-bit unsigned integers
+    pub type Nonce = u32;             // Nonces are 32-bit unsigned integers
+    
+    // Complex types built from the basic types
+    pub type Extrinsic = crate::support::Extrinsic<AccountId, crate::RuntimeCall>;
+    pub type Header = crate::support::Header<BlockNumber>;
+    pub type Block = crate::support::Block<Header, Extrinsic>;
+}
+
+// This enum contains all the calls available to our runtime
+// Each pallet contributes its calls here
+pub enum RuntimeCall {
+    Balances(balances::Call<Runtime>),  // Balances pallet calls
+    Staking(staking::Call<Runtime>),    // Staking pallet calls
+}
+
+// Our main Runtime struct - this implements the Config traits for all pallets
 #[derive(Debug)]
 pub struct Runtime {
-    pub system: system::Pallet,
-    pub balances: balances::Pallet,
-    pub staking: staking::Pallet,
+    pub system: system::Pallet<Self>,    // Self refers to Runtime
+    pub balances: balances::Pallet<Self>,
+    pub staking: staking::Pallet<Self>,  // Add staking pallet
+}
+
+// Implement system::Config for Runtime
+// This tells the system pallet what types to use
+impl system::Config for Runtime {
+    type AccountId = types::AccountId;     // Use String for accounts
+    type BlockNumber = types::BlockNumber; // Use u32 for block numbers
+    type Nonce = types::Nonce;            // Use u32 for nonces
+}
+
+// Implement balances::Config for Runtime
+// This tells the balances pallet what types to use
+impl balances::Config for Runtime {
+    type Balance = types::Balance;  // Use u128 for balances
+}
+
+// Implement staking::Config for Runtime
+// This tells the staking pallet what types to use
+impl staking::Config for Runtime {
+    type Balance = types::Balance;  // Use u128 for staking balances too
 }
 
 impl Runtime {
     // Create a new instance of the runtime
     fn new() -> Self {
         Runtime {
-            system: system::Pallet::new(),
-            balances: balances::Pallet::new(),
-            staking: staking::Pallet::new(),
+            system: system::Pallet::new(),   // Create system pallet with Runtime's config
+            balances: balances::Pallet::new(), // Create balances pallet with Runtime's config
+            staking: staking::Pallet::new_with_config(100, 5, 10, 10), // Create staking pallet with config
         }
     }
 
@@ -45,12 +88,13 @@ impl Runtime {
                 }
             }
         }
+
         // Finalize the block and generate hash
         let block_hash = self.system.finalize_block();
-
+        
         // Print staking events for this block
         self.print_staking_events();
-
+        
         println!("📦 Block #{} finalized", current_block);
         println!("🔗 Block Hash: {:?}", hex_encode(&block_hash[..8]));
 
@@ -72,7 +116,7 @@ impl Runtime {
             Transaction::Transfer { from, to, amount } => {
                 self.system.inc_nonce(&from);
 
-                //Attempt the transfer
+                // Attempt the transfer using the generic balances pallet
                 match self.balances.transfer(from.clone(), to.clone(), amount) {
                     Ok(_) => {
                         println!("💸 Transfer: {} -> {} (amount: {})", from, to, amount);
@@ -87,50 +131,36 @@ impl Runtime {
                     }
                 }
             }
-            Transaction::AddValidator {
-                validator,
-                commission,
-            } => match self.staking.add_validator(validator.clone(), commission) {
-                staking::Result::Ok(_) => {
-                    println!(
-                        "✅ Validator added: {} (commission: {}%)",
-                        validator, commission
-                    );
-                    Ok(())
-                }
-                staking::Result::Err(e) => {
-                    println!("❌ Failed to add validator: {} - Error: {:?}", validator, e);
-                    Err(format!("{:?}", e))
-                }
-            },
             Transaction::SetBalance { who, amount } => {
                 println!("💰 Set balance: {} = {}", who, amount);
                 self.balances.set_balance(&who, amount);
                 Ok(())
             }
-            Transaction::Stake {
-                who,
-                amount,
-                validator,
-            } => {
+            Transaction::AddValidator { validator, commission } => {
+                match self.staking.add_validator(validator.clone(), commission) {
+                    staking::Result::Ok(_) => {
+                        println!("✅ Validator added: {} (commission: {}%)", validator, commission);
+                        Ok(())
+                    }
+                    staking::Result::Err(e) => {
+                        println!("❌ Failed to add validator: {} - Error: {:?}", validator, e);
+                        Err(format!("{:?}", e))
+                    }
+                }
+            }
+            Transaction::Stake { who, amount, validator } => {
                 self.system.inc_nonce(&who);
 
                 // Create a closure that checks balance
                 let balances = &self.balances;
                 let balance_check = |account: &String| -> u128 { balances.balance(account) };
 
-                match self
-                    .staking
-                    .stake(who.clone(), amount, validator.clone(), balance_check)
-                {
+                match self.staking.stake(who.clone(), amount, validator.clone(), balance_check) {
                     Ok(_) => {
                         // Deduct the staked amount from balance
                         let current_balance = self.balances.balance(&who);
                         self.balances.set_balance(&who, current_balance - amount);
-                        println!(
-                            "🔒 Staked: {} staked {} with validator {}",
-                            who, amount, validator
-                        );
+                        println!("🔒 Staked: {} staked {} with validator {}", who, amount, validator);
                         Ok(())
                     }
                     Err(e) => {
@@ -176,7 +206,29 @@ impl Runtime {
         }
     }
 
-    // Print comprehensive Blockchain state - updated to include staking info
+    // Execute a block using the support framework
+    fn execute_block(&mut self, block: types::Block) -> support::DispatchResult {
+        self.system.inc_block_number();
+
+        if self.system.block_number() != block.header.block_number {
+            return Err("block number does not match what is expected");
+        }
+
+        // Process each extrinsic in the block
+        for (i, support::Extrinsic { caller, call }) in block.extrinsics.into_iter().enumerate() {
+            self.system.inc_nonce(&caller);
+            let _res = self.dispatch(caller, call).map_err(|e| {
+                eprintln!(
+                    "Extrinsic Error\n\tBlock Number: {}\n\tExtrinsic Number: {}\n\tError: {}",
+                    block.header.block_number, i, e
+                )
+            });
+        }
+
+        Ok(())
+    }
+
+    // Print comprehensive blockchain state - updated to include staking info
     fn print_blockchain_state(&self) {
         println!("\n🔍 === BLOCKCHAIN STATE ===");
         println!("Current Block: #{}", self.system.block_number());
@@ -188,7 +240,7 @@ impl Runtime {
             println!("  Block #{}: {}", block_num, hex_encode(&hash[..8]));
         }
 
-        // Show account Balances
+        // Show account balances
         println!("\n💳 Account Balances:");
         let accounts = ["Femi", "temi", "cheryl", "nathaniel", "faith"];
         for account in accounts {
@@ -203,10 +255,7 @@ impl Runtime {
         println!("\n🔒 Staking Information:");
         let stats = self.staking.get_staking_stats();
         println!("  Total Staked: {}", stats.total_staked);
-        println!(
-            "  Active Validators: {}/{}",
-            stats.active_validators, stats.total_validators
-        );
+        println!("  Active Validators: {}/{}", stats.active_validators, stats.total_validators);
         println!("  Total Stakers: {}", stats.total_stakers);
 
         // Show validators
@@ -225,26 +274,23 @@ impl Runtime {
             if let Some(stake_info) = self.staking.get_stake_info(&account.to_string()) {
                 println!(
                     "    • {} staking {} with {} (rewards: {})",
-                    account,
-                    stake_info.staked_amount,
-                    stake_info.validator,
-                    stake_info.total_rewards
+                    account, stake_info.staked_amount, stake_info.validator, stake_info.total_rewards
                 );
             }
         }
 
-        // Show Genesis Hash
         if let Some(genesis_hash) = self.system.genesis_hash() {
             println!("\n🌱 Genesis Hash: {}", hex_encode(&genesis_hash[..8]));
         }
         println!("=========================\n");
     }
+
     // Verify Blockchain Integrity
     fn verify_chain_integrity(&self) -> bool {
         let all_hashes = self.system.all_block_hashes();
 
         for block_num in 1..=self.system.block_number() {
-            if let Some(current_hash) = all_hashes.get(&block_num) {
+            if let Some(_current_hash) = all_hashes.get(&block_num) {
                 println!("✅ Block #{} hash verified", block_num);
             } else {
                 println!("❌ Block #{} hash missing!", block_num);
@@ -265,11 +311,7 @@ impl Runtime {
                     staking::StakingEvent::ValidatorAdded { validator } => {
                         println!("  • Validator added: {}", validator);
                     }
-                    staking::StakingEvent::Staked {
-                        who,
-                        amount,
-                        validator,
-                    } => {
+                    staking::StakingEvent::Staked { who, amount, validator } => {
                         println!("  • {} staked {} tokens with {}", who, amount, validator);
                     }
                     staking::StakingEvent::Unstaked { who, amount } => {
@@ -285,7 +327,26 @@ impl Runtime {
     }
 }
 
-// Transaction types
+// Implement the Dispatch trait for Runtime
+// This allows the runtime to route calls to the appropriate pallet
+impl support::Dispatch for Runtime {
+    type Caller = <Runtime as system::Config>::AccountId;  // Use the AccountId from our config
+    type Call = RuntimeCall;
+
+    fn dispatch(&mut self, caller: Self::Caller, call: Self::Call) -> support::DispatchResult {
+        match call {
+            RuntimeCall::Balances(call) => {
+                self.balances.dispatch(caller, call)?;  // Route to balances pallet
+            }
+            RuntimeCall::Staking(call) => {
+                self.staking.dispatch(caller, call)?;   // Route to staking pallet
+            }
+        }
+        Ok(())
+    }
+}
+
+// Transaction types for our simplified API
 #[derive(Debug, Clone)]
 pub enum Transaction {
     Transfer {
@@ -314,7 +375,7 @@ pub enum Transaction {
     },
 }
 
-// Block Execution Result
+// Block execution result
 #[derive(Debug)]
 pub struct BlockResult {
     pub block_number: u32,
@@ -327,30 +388,29 @@ pub struct BlockResult {
 fn hex_encode(bytes: &[u8]) -> String {
     bytes
         .iter()
-        .map(|b| format!("{:03x}", b))
+        .map(|b| format!("{:02x}", b))
         .collect::<String>()
 }
 
 fn main() {
     let mut runtime = Runtime::new();
 
-    println!("🚀 Starting Blockchain Simulation");
-    println!("==================================");
+    println!("🚀 Starting Blockchain Simulation with Generics");
+    println!("===============================================");
 
-    // Users
+    // Users - these are of type String (our AccountId type)
+    let cheryl = String::from("cheryl");
     let femi = String::from("Femi");
     let temi = String::from("temi");
-    let cheryl = String::from("cheryl");
     let nathaniel = String::from("nathaniel");
     let faith = String::from("faith");
 
-    // Genesis Block (Block 0) - Initial setup
+    // Genesis Block - Initial setup
     println!("\n🌱 === GENESIS BLOCK ===");
-
     let genesis_transactions = vec![
         Transaction::SetBalance {
             who: cheryl.clone(),
-            amount: 10000,
+            amount: 10000,  // This is of type u128 (our Balance type)
         },
         Transaction::SetBalance {
             who: femi.clone(),
@@ -364,7 +424,7 @@ fn main() {
         genesis_result.transaction_count
     );
 
-    // Block 1 - Initial Transfers
+    // Block 1 - Transfers
     let block_1_transactions = vec![
         Transaction::Transfer {
             from: cheryl.clone(),
@@ -382,14 +442,11 @@ fn main() {
             amount: 100,
         },
     ];
-    let block_1_result = runtime.create_block(block_1_transactions);
-    println!(
-        "Block 1 completed with {}/{} successful transactions",
-        block_1_result.transaction_count,
-        block_1_result.successful_transactions.len() + block_1_result.failed_transactions.len()
-    );
 
-    // Block 2 - More  transfers
+    let block_1_result = runtime.create_block(block_1_transactions);
+    println!("Block 1 completed with {} transactions", block_1_result.transaction_count);
+
+    // Block 2 - More transfers
     let block_2_transactions = vec![
         Transaction::Transfer {
             from: cheryl.clone(),
@@ -409,19 +466,15 @@ fn main() {
     ];
 
     let block_2_result = runtime.create_block(block_2_transactions);
-    println!(
-        "Block 2 completed with {}/{} successful transactions",
-        block_2_result.transaction_count,
-        block_2_result.successful_transactions.len() + block_2_result.failed_transactions.len()
-    );
+    println!("Block 2 completed with {} transactions", block_2_result.transaction_count);
 
-    // Block 3 - Included some failures
+    // Block 3 - Include some failures
     let block_3_transactions = vec![
         Transaction::Transfer {
             from: cheryl.clone(),
             to: nathaniel.clone(),
-            amount: 9200,
-        }, // Should fail
+            amount: 9200, // Should fail
+        },
         Transaction::Transfer {
             from: temi.clone(),
             to: faith.clone(),
@@ -435,13 +488,9 @@ fn main() {
     ];
 
     let block_3_result = runtime.create_block(block_3_transactions);
-    println!(
-        "Block 3 completed with {}/{} successful transactions",
-        block_3_result.transaction_count,
-        block_3_result.successful_transactions.len() + block_3_result.failed_transactions.len()
-    );
+    println!("Block 3 completed with {} transactions", block_3_result.transaction_count);
 
-    // Block 4 - Set up validators
+    // Block 4 - Set up validators and staking
     println!("\n⚡ === STAKING SETUP ===");
     let block_4_transactions = vec![
         Transaction::AddValidator {
@@ -468,11 +517,6 @@ fn main() {
             amount: 150,
             validator: "nathaniel".to_string(),
         },
-        Transaction::Stake {
-            who: "faith".to_string(),
-            amount: 50, // This might fail if faith doesn't have enough balance
-            validator: "cheryl".to_string(),
-        },
     ];
     let block_5_result = runtime.create_block(block_5_transactions);
     println!("Block 5 completed: Staking initiated");
@@ -480,10 +524,10 @@ fn main() {
     // Advance several blocks to accumulate rewards
     for i in 6..=10 {
         runtime.create_block(vec![]);
-        println!("Block {} created (empty)", i);
+        println!("Block {} created (empty block for rewards)", i);
     }
 
-    // Block 11 - Claim rewards
+    // Block 11 - Claim rewards and unstake
     let block_11_transactions = vec![
         Transaction::ClaimRewards {
             who: "femi".to_string(),
@@ -491,49 +535,46 @@ fn main() {
         Transaction::ClaimRewards {
             who: "temi".to_string(),
         },
+        Transaction::Unstake {
+            who: "femi".to_string(),
+        },
     ];
-
     let block_11_result = runtime.create_block(block_11_transactions);
-    println!("Block 11 completed: Rewards claimed");
+    println!("Block 11 completed: Rewards claimed and unstaking attempted");
 
-    // Block 12 - Try unstaking (some might fail due to unstaking period)
-    let block_12_transactions = vec![
-        Transaction::Unstake {
-            who: "femi".to_string(),
+    // Example using the support framework (like the main branch)
+    println!("\n🔧 === USING SUPPORT FRAMEWORK ===");
+    
+    // Create a block using the support framework types
+    let support_block = types::Block {
+        header: support::Header { 
+            block_number: runtime.system.block_number() + 1 
         },
-        Transaction::Unstake {
-            who: "temi".to_string(),
-        },
-    ];
+        extrinsics: vec![
+            support::Extrinsic {
+                caller: cheryl.clone(),
+                call: RuntimeCall::Balances(balances::Call::Transfer {
+                    to: faith.clone(),
+                    amount: 25,
+                }),
+            },
+            support::Extrinsic {
+                caller: "nathaniel".to_string(),
+                call: RuntimeCall::Staking(staking::Call::ClaimRewards),
+            },
+        ],
+    };
 
-    let block_12_result = runtime.create_block(block_12_transactions);
-    println!("Block 12 completed: Unstaking attempted");
+    // Execute the block
+    runtime.execute_block(support_block).expect("Block execution failed");
 
-    // Advance more blocks to pass unstaking period
-    for i in 13..=20 {
-        runtime.create_block(vec![]);
-    }
-
-    // Block 21 - Retry unstaking
-    let block_21_transactions = vec![
-        Transaction::Unstake {
-            who: "femi".to_string(),
-        },
-        Transaction::Unstake {
-            who: "temi".to_string(),
-        },
-    ];
-
-    runtime.create_block(block_21_transactions);
-    println!("Block 21 completed: Unstaking successful");
-
-    //Print final state
+    // Print final state
     runtime.print_blockchain_state();
 
-    //Verify blockchain Integrity
+    // Verify blockchain integrity
     runtime.verify_chain_integrity();
 
-    //Demonstrate hash relationships
+    // Demonstrate hash relationships
     println!("🔗 === BLOCK HASH RELATIONSHIPS ===");
     for block_num in 0..=runtime.system.block_number() {
         if let Some(hash) = runtime.system.get_block_hash(block_num) {
@@ -560,53 +601,17 @@ fn main() {
         runtime.system.all_block_hashes().len()
     );
 
-    // // give some money - GENSIS Block
-    // runtime.balances.set_balance(&cheryl, 1000);
-
-    // create a block
-    // increase block number
-    // runtime.system.inc_block_number();
-    // assert_eq!(runtime.system.block_number(), 1);
-
-    // // first transaction
-    // runtime.system.inc_nonce(&cheryl);
-    // let _res = runtime
-    //     .balances
-    //     .transfer(cheryl.clone(), faith.clone(), 50)
-    //     .map_err(|e| println!("error: {}", e));
-
-    // // second transaction
-    // runtime.system.inc_nonce(&cheryl);
-    // let _res = runtime
-    //     .balances
-    //     .transfer(cheryl.clone(), nathaniel.clone(), 70)
-    //     .map_err(|e| println!("error: {}", e));
-
-    // // Create block 2
-    // runtime.system.inc_block_number();
-    // assert_eq!(runtime.system.block_number(), 2);
-
-    // runtime.system.inc_nonce(&cheryl);
-    // let _res = runtime
-    //     .balances
-    //     .transfer(cheryl.clone(), femi.clone(), 100)
-    //     .map_err(|e| println!("error: {}", e));
-
-    // runtime.system.inc_nonce(&femi);
-    // let _res = runtime
-    //     .balances
-    //     .transfer(femi.clone(), temi.clone(), 100)
-    //     .map_err(|e| println!("error: {}", e));
-
-    // // block 3 : should fail
-    // runtime.system.inc_block_number();
-    // assert_eq!(runtime.system.block_number(), 3);
-
-    // runtime.system.inc_nonce(&cheryl);
-    // let _res = runtime
-    //     .balances
-    //     .transfer(cheryl.clone(), nathaniel.clone(), 1200)
-    //     .map_err(|e| println!("error: {}", e));
-
-    // println!("{:#?}", runtime);
+    println!("\n✨ === GENERIC BENEFITS DEMONSTRATED ===");
+    println!("• Type safety: AccountId, Balance, BlockNumber are enforced at compile time");
+    println!("• Flexibility: Easy to change u128 to u64 or String to u32 by updating types module");
+    println!("• Reusability: Same pallet code works with different type configurations");
+    println!("• Maintainability: Types are centralized in one place");
+    println!("• Staking integration: Generic staking pallet works seamlessly with balances");
+    
+    println!("\n🎯 === STAKING FEATURES IMPLEMENTED ===");
+    println!("• Generic validator management");
+    println!("• Type-safe staking operations");
+    println!("• Reward calculation and distribution");
+    println!("• Unstaking with period requirements");
+    println!("• Integration with balance transfers");
 }
